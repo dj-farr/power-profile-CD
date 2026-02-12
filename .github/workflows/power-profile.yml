@@ -1,0 +1,40 @@
+name: Power Profile Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:  # allows manual trigger from GitHub UI
+
+jobs:
+  power-profile:
+    runs-on: self-hosted
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Run battery discharge replay
+        run: |
+          python3 scripts/battery_replay.py \
+            -i profiles/battery_profile.csv \
+            -o power_log.csv
+
+      - name: Analyze power profile
+        run: |
+          python3 scripts/analyze_profile.py power_log.csv \
+            --avg-budget 200 \
+            --peak-budget 500 \
+            --min-voltage 5.60 \
+            -o profile_report.png
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: power-profile-results
+          path: |
+            power_log.csv
+            profile_report.png
