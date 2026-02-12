@@ -20,11 +20,19 @@ jobs:
         run: |
           python3 scripts/battery_replay.py \
             -i profiles/battery_profile.csv \
-            -o power_log.csv
+            -o power_log.csv \
+            -p power_report.png
 
-      - name: Upload results
+      - name: Upload power report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: power-profile-results
+          name: power-report
+          path: power_report.png
+
+      - name: Upload raw data (debug)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: power-log-debug
           path: power_log.csv
