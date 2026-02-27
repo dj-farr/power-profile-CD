@@ -1,0 +1,107 @@
+name: Power Profile Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      firmware_ref:
+        description: 'Firmware git ref to checkout (branch, tag, or SHA)'
+        required: false
+        default: 'main'
+      avg_budget_ma:
+        description: 'Max average current (mA)'
+        required: false
+        default: '200'
+      peak_budget_ma:
+        description: 'Max peak current (mA)'
+        required: false
+        default: '500'
+      min_voltage:
+        description: 'Min voltage (V) DUT must survive'
+        required: false
+        default: '5.60'
+
+jobs:
+  power-profile:
+    runs-on: self-hosted
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout testbench repo
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Update firmware submodule
+        run: |
+          cd r2firmware/ascent-r2-firmware
+          git fetch origin
+          git checkout ${{ github.event.inputs.firmware_ref || 'main' }}
+          git pull origin ${{ github.event.inputs.firmware_ref || 'main' }} || true
+          echo "Firmware ref: $(git rev-parse --short HEAD)"
+
+      - name: Build firmware
+        run: pio run -d r2firmware/ascent-r2-firmware
+
+      - name: Ensure USB power is ON
+        run: ./scripts/usb_power.sh on
+
+      - name: Flash DUT
+        run: pio run -d r2firmware/ascent-r2-firmware -t upload
+
+      - name: Cut USB power
+        run: |
+          echo "*** CUTTING USB POWER — dual power will destroy the board ***"
+          ./scripts/usb_power.sh off
+
+      - name: Wait for USB power to drop
+        run: sleep 2
+
+      - name: Verify USB power is OFF before PSU
+        run: |
+          echo "*** SAFETY CHECK: Verifying USB VBUS is off before enabling PSU ***"
+          STATUS=$(sudo uhubctl -l 1-1 2>&1)
+          if echo "$STATUS" | grep -q "off"; then
+            echo "CONFIRMED: USB power is OFF — safe to proceed"
+          else
+            echo "ABORT: USB power is still ON — refusing to enable PSU"
+            echo "$STATUS"
+            exit 1
+          fi
+
+      - name: Run battery discharge replay
+        run: |
+          python3 scripts/battery_replay.py \
+            -i profiles/2s_lipo_discharge.csv \
+            -o power_log.csv \
+            -p power_report.png
+
+      - name: Restore USB power
+        if: always()
+        run: ./scripts/usb_power.sh on
+
+      - name: Analyze power profile
+        run: |
+          python3 scripts/analyze_profile.py \
+            power_log.csv \
+            -o power_report_analysis.png \
+            --avg-budget ${{ github.event.inputs.avg_budget_ma || '200' }} \
+            --peak-budget ${{ github.event.inputs.peak_budget_ma || '500' }} \
+            --min-voltage ${{ github.event.inputs.min_voltage || '5.60' }}
+
+      - name: Upload power report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: power-report
+          path: |
+            power_report.png
+            power_report_analysis.png
+            power_log.csv
+
+      - name: Upload debug artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: power-debug
+          path: |
+            power_log.csv
