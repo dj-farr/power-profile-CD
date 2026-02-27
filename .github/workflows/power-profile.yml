@@ -3,10 +3,6 @@ name: Power Profile Test
 on:
   workflow_dispatch:
     inputs:
-      firmware_ref:
-        description: 'Firmware git ref to checkout (branch, tag, or SHA)'
-        required: false
-        default: 'main'
       avg_budget_ma:
         description: 'Max average current (mA)'
         required: false
@@ -21,32 +17,64 @@ on:
         default: '5.60'
 
 jobs:
-  power-profile:
-    runs-on: self-hosted
+  build:
+    name: Build firmware
+    runs-on: [self-hosted, mac]
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout testbench repo
+        uses: actions/checkout@v4
+
+      - name: Verify firmware repo exists
+        run: |
+          # Firmware is a private repo cloned locally — not tracked in this repo.
+          # It must already exist at r2firmware/ascent-r2-firmware/ on the runner.
+          if [ ! -f r2firmware/ascent-r2-firmware/platformio.ini ]; then
+            echo "ERROR: Firmware repo not found at r2firmware/ascent-r2-firmware/"
+            echo "Clone it manually: git clone <firmware-repo-url> r2firmware/ascent-r2-firmware"
+            exit 1
+          fi
+          echo "Firmware repo found. HEAD: $(git -C r2firmware/ascent-r2-firmware rev-parse --short HEAD)"
+
+      - name: Build firmware
+        run: pio run -d r2firmware/ascent-r2-firmware
+
+      - name: Upload firmware binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: |
+            r2firmware/ascent-r2-firmware/.pio/build/esp32-s3-devkitc-1/firmware.bin
+            r2firmware/ascent-r2-firmware/.pio/build/esp32-s3-devkitc-1/bootloader.bin
+            r2firmware/ascent-r2-firmware/.pio/build/esp32-s3-devkitc-1/partitions.bin
+
+  test:
+    name: Flash & power profile
+    needs: build
+    runs-on: [self-hosted, rpi]
     timeout-minutes: 30
 
     steps:
       - name: Checkout testbench repo
         uses: actions/checkout@v4
+
+      - name: Download firmware binaries
+        uses: actions/download-artifact@v4
         with:
-          submodules: true
-
-      - name: Update firmware submodule
-        run: |
-          cd r2firmware/ascent-r2-firmware
-          git fetch origin
-          git checkout ${{ github.event.inputs.firmware_ref || 'main' }}
-          git pull origin ${{ github.event.inputs.firmware_ref || 'main' }} || true
-          echo "Firmware ref: $(git rev-parse --short HEAD)"
-
-      - name: Build firmware
-        run: pio run -d r2firmware/ascent-r2-firmware
+          name: firmware
+          path: firmware/
 
       - name: Ensure USB power is ON
         run: ./scripts/usb_power.sh on
 
       - name: Flash DUT
-        run: pio run -d r2firmware/ascent-r2-firmware -t upload
+        run: |
+          esptool.py --chip esp32s3 --port /dev/ttyACM0 --baud 921600 \
+            write_flash \
+            0x0000 firmware/bootloader.bin \
+            0x8000 firmware/partitions.bin \
+            0x10000 firmware/firmware.bin
 
       - name: Cut USB power
         run: |
@@ -103,5 +131,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: power-debug
-          path: |
-            power_log.csv
+          path: power_log.csv
